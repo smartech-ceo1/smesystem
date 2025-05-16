@@ -1,0 +1,652 @@
+const express = require('express');
+const mysql = require('mysql2');
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+const app = express();
+const port = 3001;
+const JWT_SECRET = 'your_jwt_secret_key'; // Replace with a secure key in production
+
+app.use(cors());
+app.use(express.json());
+
+// Serve static files from uploads directory
+const uploadsPath = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsPath)) {
+  fs.mkdirSync(UploadsPath, { recursive: true });
+}
+console.log('Serving uploads from:', uploadsPath);
+console.log('Uploads folder exists:', fs.existsSync(uploadsPath));
+app.use('/Uploads', express.static(uploadsPath, {
+  setHeaders: (res, filePath) => {
+    console.log(`Serving file: ${filePath}`);
+  },
+  index: false,
+  extensions: ['jpg', 'jpeg', 'png']
+}));
+app.use('/Uploads', (req, res) => {
+  console.error(`File not found: ${req.originalUrl}`);
+  res.status(404).json({ error: 'Image not found' });
+});
+
+// Test route to list uploads folder contents
+app.get('/api/Uploads/list', (req, res) => {
+  fs.readdir(uploadsPath, (err, files) => {
+    if (err) {
+      console.error('Error reading uploads folder:', err);
+      return res.status(500).json({ error: 'Unable to read uploads folder' });
+    }
+    console.log('Uploads folder contents:', files);
+    return res.json(files);
+  });
+});
+
+// MySQL Connection
+const db = mysql.createConnection({
+  host: 'localhost',
+  user: 'root',
+  password: 'Senior@ceo1',
+  database: 'smesystem'
+});
+
+db.connect(err => {
+  if (err) {
+    console.error('Database connection failed:', err);
+    process.exit(1);
+  }
+  console.log('Connected to MySQL database');
+});
+
+// Multer Configuration for Image Uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+    cb(null, `image-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    console.log('File received:', file);
+    if (!file || !file.originalname) {
+      console.error('No file uploaded or invalid file');
+      return cb(new Error('No file uploaded or invalid file'));
+    }
+    const filetypes = /jpeg|jpg|png/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype);
+    if (extname && mimetype) {
+      return cb(null, true);
+    }
+    console.error(`Invalid file type: ${file.mimetype}`);
+    return cb(new Error('Only .jpg, .jpeg, and .png files are allowed!'));
+  },
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
+
+// Authentication Middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer <token>
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+const requireAdmin = (req, res, next) => {
+  if (!req.user.is_admin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+};
+
+// Global Error Handling Middleware
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `Multer error: ${err.message}` });
+  }
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
+// API Routes
+
+// User Signup
+app.post('/api/signup', async (req, res) => {
+  console.log('POST /api/signup body:', req.body);
+  const { name, email, password, isAdmin } = req.body;
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'Name, email, and password are required' });
+  }
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    db.query(
+      'INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, ?)',
+      [name, email, hashedPassword, isAdmin || false],
+      (err, result) => {
+        if (err) {
+          if (err.code === 'ER_DUP_ENTRY') {
+            return res.status(400).json({ error: 'Email already exists' });
+          }
+          console.error('Error creating user:', err);
+          return res.status(500).json({ error: 'Database error' });
+        }
+        const user = { id: result.insertId, name, email, is_admin: isAdmin || false };
+        console.log('User created:', user);
+        const token = jwt.sign(
+          { id: user.id, email: user.email, is_admin: user.is_admin },
+          JWT_SECRET,
+          { expiresIn: '1h' }
+        );
+        res.json({ success: true, user, token });
+      }
+    );
+  } catch (error) {
+    console.error('Error hashing password:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// User Login
+app.post('/api/login', (req, res) => {
+  console.log('POST /api/login body:', req.body);
+  const { email, password, isAdmin } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+  db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
+    if (err) {
+      console.error('Error fetching user:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    const user = results[0];
+    if (isAdmin && !user.is_admin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    try {
+      const match = await bcrypt.compare(password, user.password);
+      if (!match) {
+        return res.status(401).json({ error: 'Invalid email or password' });
+      }
+      const token = jwt.sign(
+        { id: user.id, email: user.email, is_admin: user.is_admin },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+      console.log('Login successful:', { email, is_admin: user.is_admin });
+      res.json({ success: true, user: { id: user.id, email: user.email, is_admin: user.is_admin }, token });
+    } catch (error) {
+      console.error('Error verifying password:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+});
+
+// Get all categories with their images
+app.get('/api/categories', (req, res) => {
+  console.log('GET /api/categories');
+  const query = `
+    SELECT c.id, c.name, ci.id AS image_id, ci.image
+    FROM categories c
+    LEFT JOIN category_images ci ON c.id = ci.category_id
+  `;
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('Error fetching categories:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    const categories = [];
+    const categoryMap = new Map();
+    results.forEach(row => {
+      if (!categoryMap.has(row.id)) {
+        categoryMap.set(row.id, {
+          id: row.id,
+          name: row.name,
+          images: []
+        });
+        categories.push(categoryMap.get(row.id));
+      }
+      if (row.image_id) {
+        categoryMap.get(row.id).images.push({
+          id: row.image_id,
+          image: row.image
+        });
+      }
+    });
+    console.log('Categories fetched:', categories);
+    return res.json(categories);
+  });
+});
+
+// Create a new category (Admin only)
+app.post('/api/categories', authenticateToken, requireAdmin, upload.array('images', 10), (req, res) => {
+  console.log('POST /api/categories body:', req.body, 'files:', req.files);
+  const { name } = req.body;
+  const files = req.files || [];
+
+  if (!name) {
+    return res.status(400).json({ error: 'Category name is required' });
+  }
+  if (files.length === 0) {
+    return res.status(400).json({ error: 'At least one image is required' });
+  }
+
+  db.query('INSERT INTO categories (name) VALUES (?)', [name], (err, result) => {
+    if (err) {
+      console.error('Error creating category:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    const categoryId = result.insertId;
+
+    if (files.length > 0) {
+      const values = files.map(file => [categoryId, `uploads/${file.filename}`]);
+      db.query('INSERT INTO category_images (category_id, image) VALUES ?', [values], (err, imageResult) => {
+        if (err) {
+          console.error('Error saving images:', err);
+          return res.status(500).json({ error: 'Database error' });
+        }
+        const images = files.map((file, index) => ({
+          id: imageResult.insertId + index,
+          image: `Uploads/${file.filename}`
+        }));
+        console.log('Category created:', { id: categoryId, name, images });
+        return res.json({ id: categoryId, name, images });
+      });
+    } else {
+      console.log('Category created:', { id: categoryId, name, images: [] });
+      return res.json({ id: categoryId, name, images: [] });
+    }
+  });
+});
+
+// Update a category (Admin only)
+app.put('/api/categories/:id', authenticateToken, requireAdmin, (req, res) => {
+  console.log('PUT /api/categories/:id', req.params, req.body);
+  const { id } = req.params;
+  const { name } = req.body;
+
+  if (!name) {
+    return res.status(400).json({ error: 'Category name is required' });
+  }
+
+  db.query('SELECT id FROM categories WHERE id = ?', [id], (err, results) => {
+    if (err) {
+      console.error('Error validating category:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    db.query('UPDATE categories SET name = ? WHERE id = ?', [name, id], err => {
+      if (err) {
+        console.error('Error updating category:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      console.log('Category updated:', { id, name });
+      return res.json({ id, name });
+    });
+  });
+});
+
+// Delete a category (Admin only)
+app.delete('/api/categories/:id', authenticateToken, requireAdmin, (req, res) => {
+  console.log('DELETE /api/categories/:id', req.params);
+  const { id } = req.params;
+
+  db.query('SELECT id FROM categories WHERE id = ?', [id], (err, results) => {
+    if (err) {
+      console.error('Error validating category:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    db.query('SELECT image FROM category_images WHERE category_id = ?', [id], (err, imageResults) => {
+      if (err) {
+        console.error('Error fetching category images for deletion:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      db.query('SELECT image FROM products WHERE category_id = ?', [id], (err, productResults) => {
+        if (err) {
+          console.error('Error fetching product images for deletion:', err);
+          return res.status(500).json({ error: 'Database error' });
+        }
+
+        imageResults.forEach(row => {
+          const imagePath = path.join(uploadsPath, path.basename(row.image));
+          try {
+            if (fs.existsSync(imagePath)) {
+              fs.unlinkSync(imagePath);
+              console.log(`Deleted category image file: ${imagePath}`);
+            }
+          } catch (unlinkErr) {
+            console.error(`Error deleting category image file ${imagePath}:`, unlinkErr);
+          }
+        });
+
+        productResults.forEach(row => {
+          if (row.image) {
+            const imagePath = path.join(uploadsPath, path.basename(row.image));
+            try {
+              if (fs.existsSync(imagePath)) {
+                fs.unlinkSync(imagePath);
+                console.log(`Deleted product image file: ${imagePath}`);
+              }
+            } catch (unlinkErr) {
+              console.error(`Error deleting product image file ${imagePath}:`, unlinkErr);
+            }
+          }
+        });
+
+        db.query('DELETE FROM categories WHERE id = ?', [id], err => {
+          if (err) {
+            console.error('Error deleting category:', err);
+            return res.status(500).json({ error: 'Database error' });
+          }
+          console.log('Category deleted:', { id });
+          return res.json({ message: 'Category deleted' });
+        });
+      });
+    });
+  });
+});
+
+// Upload images for a category (Admin only)
+app.post('/api/categories/:categoryId/images', authenticateToken, requireAdmin, upload.array('images', 10), (req, res) => {
+  console.log('POST /api/categories/:categoryId/images body:', req.body, 'files:', req.files);
+  const { categoryId } = req.params;
+  const files = req.files || [];
+
+  if (!files || files.length === 0) {
+    return res.status(400).json({ error: 'No images uploaded' });
+  }
+
+  db.query('SELECT id FROM categories WHERE id = ?', [categoryId], (err, results) => {
+    if (err) {
+      console.error('Error validating category:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    const values = files.map(file => [categoryId, `Uploads/${file.filename}`]);
+    db.query('INSERT INTO category_images (category_id, image) VALUES ?', [values], (err, result) => {
+      if (err) {
+        console.error('Error saving images:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      const images = files.map((file, index) => ({
+        id: result.insertId + index,
+        image: `Uploads/${file.filename}`
+      }));
+      console.log('Images uploaded for category:', { categoryId, images });
+      return res.json({ message: 'Images uploaded successfully', images });
+    });
+  });
+});
+
+// Update a category image (Admin only)
+app.put('/api/category-images/:imageId', authenticateToken, requireAdmin, upload.single('image'), (req, res) => {
+  console.log('PUT /api/category-images/:imageId body:', req.body, 'file:', req.file);
+  const { imageId } = req.params;
+  const file = req.file;
+
+  if (!file) {
+    return res.status(400).json({ error: 'No image uploaded' });
+  }
+
+  db.query('SELECT image FROM category_images WHERE id = ?', [imageId], (err, results) => {
+    if (err) {
+      console.error('Error fetching image:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const oldImagePath = path.join(uploadsPath, path.basename(results[0].image));
+    const newImagePath = `Uploads/${file.filename}`;
+
+    db.query('UPDATE category_images SET image = ? WHERE id = ?', [newImagePath, imageId], err => {
+      if (err) {
+        console.error('Error updating image:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      try {
+        if (fs.existsSync(oldImagePath)) {
+          fs.unlinkSync(oldImagePath);
+          console.log(`Deleted old image file: ${oldImagePath}`);
+        }
+      } catch (unlinkErr) {
+        console.error(`Error deleting old image file ${oldImagePath}:`, unlinkErr);
+      }
+
+      console.log('Image updated:', { imageId, newImagePath });
+      return res.json({ message: 'Image updated successfully', image: newImagePath });
+    });
+  });
+});
+
+// Delete a category image (Admin only)
+app.delete('/api/category-images/:imageId', authenticateToken, requireAdmin, (req, res) => {
+  console.log('DELETE /api/category-images/:imageId', req.params);
+  const { imageId } = req.params;
+
+  db.query('SELECT image FROM category_images WHERE id = ?', [imageId], (err, results) => {
+    if (err) {
+      console.error('Error fetching image:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const imagePath = path.join(UploadsPath, path.basename(results[0].image));
+
+    db.query('DELETE FROM category_images WHERE id = ?', [imageId], err => {
+      if (err) {
+        console.error('Error deleting image:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      try {
+        if (fs.existsSync(imagePath)) {
+          fs.unlinkSync(imagePath);
+          console.log(`Deleted image file: ${imagePath}`);
+        }
+      } catch (unlinkErr) {
+        console.error(`Error deleting image file ${imagePath}:`, unlinkErr);
+      }
+
+      console.log('Image deleted:', { imageId });
+      return res.json({ message: 'Image deleted successfully' });
+    });
+  });
+});
+
+// Product routes
+app.get('/api/products', (req, res) => {
+  console.log('GET /api/products');
+  const query = `
+    SELECT p.id, p.name, p.price, p.quantity, p.image, p.category_id, c.name AS category
+    FROM products p
+    LEFT JOIN categories c ON p.category_id = c.id
+  `;
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('Error fetching products:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    const products = results.map(product => ({
+      id: product.id,
+      name: product.name,
+      category: product.category || 'Unknown',
+      category_id: product.category_id,
+      price: product.price,
+      quantity: product.quantity,
+      rating: 4.0,
+      image: product.image
+    }));
+    console.log('Products fetched:', products);
+    return res.json(products);
+  });
+});
+
+app.post('/api/products', authenticateToken, requireAdmin, upload.single('image'), (req, res) => {
+  console.log('POST /api/products body:', req.body, 'file:', req.file);
+  const { name, price, quantity, category_id } = req.body;
+  const image = req.file ? `Uploads/${file.filename}` : null;
+
+  if (!name || !price || !quantity || !category_id) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  const parsedPrice = parseFloat(price);
+  const parsedQuantity = parseInt(quantity, 10);
+  const parsedCategoryId = parseInt(category_id, 10);
+  if (isNaN(parsedPrice) || isNaN(parsedQuantity) || isNaN(parsedCategoryId)) {
+    return res.status(400).json({ error: 'Invalid price, quantity, or category_id' });
+  }
+
+  db.query('SELECT id FROM categories WHERE id = ?', [parsedCategoryId], (err, results) => {
+    if (err) {
+      console.error('Error validating category:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(400).json({ error: 'Invalid category_id' });
+    }
+
+    const query = 'INSERT INTO products (name, price, quantity, image, category_id) VALUES (?, ?, ?, ?, ?)';
+    db.query(query, [name, parsedPrice, parsedQuantity, image, parsedCategoryId], (err, result) => {
+      if (err) {
+        console.error('Error adding product:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      console.log('Product added:', { id: result.insertId, name, price: parsedPrice, quantity: parsedQuantity, image, category_id: parsedCategoryId });
+      return res.json({ id: result.insertId, name, price: parsedPrice, quantity: parsedQuantity, image, category_id: parsedCategoryId });
+    });
+  });
+});
+
+app.put('/api/products/:id', authenticateToken, requireAdmin, upload.single('image'), (req, res) => {
+  console.log('PUT /api/products/:id body:', req.body, 'file:', req.file);
+  const { id } = req.params;
+  const { name, price, quantity, category_id } = req.body;
+  const image = req.file ? `Uploads/${file.filename}` : req.body.image;
+
+  if (!name || !price || !quantity || !category_id) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  const parsedPrice = parseFloat(price);
+  const parsedQuantity = parseInt(quantity, 10);
+  const parsedCategoryId = parseInt(category_id, 10);
+  if (isNaN(parsedPrice) || isNaN(parsedQuantity) || isNaN(parsedCategoryId)) {
+    return res.status(400).json({ error: 'Invalid price, quantity, or category_id' });
+  }
+
+  db.query('SELECT id FROM categories WHERE id = ?', [parsedCategoryId], (err, results) => {
+    if (err) {
+      console.error('Error validating category:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(400).json({ error: 'Invalid category_id' });
+    }
+
+    db.query('SELECT image FROM products WHERE id = ?', [id], (err, results) => {
+      if (err) {
+        console.error('Error fetching product image:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      if (results.length === 0) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+      const oldImagePath = results[0].image ? path.join(uploadsPath, path.basename(results[0].image)) : null;
+
+      const query = 'UPDATE products SET name = ?, price = ?, quantity = ?, image = ?, category_id = ? WHERE id = ?';
+      db.query(query, [name, parsedPrice, parsedQuantity, image, parsedCategoryId, id], err => {
+        if (err) {
+          console.error('Error updating product:', err);
+          return res.status(500).json({ error: 'Database error' });
+        }
+
+        if (req.file && oldImagePath && fs.existsSync(oldImagePath)) {
+          try {
+            fs.unlinkSync(oldImagePath);
+            console.log(`Deleted old image file: ${oldImagePath}`);
+          } catch (unlinkErr) {
+            console.error(`Error deleting old image file ${oldImagePath}:`, unlinkErr);
+          }
+        }
+
+        console.log('Product updated:', { id, name, price: parsedPrice, quantity: parsedQuantity, image, category_id: parsedCategoryId });
+        return res.json({ id, name, price: parsedPrice, quantity: parsedQuantity, image, category_id: parsedCategoryId });
+      });
+    });
+  });
+});
+
+app.delete('/api/products/:id', authenticateToken, requireAdmin, (req, res) => {
+  console.log('DELETE /api/products/:id', req.params);
+  const { id } = req.params;
+
+  db.query('SELECT image FROM products WHERE id = ?', [id], (err, results) => {
+    if (err) {
+      console.error('Error fetching product image:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    const imagePath = results[0].image ? path.join(UploadsPath, path.basename(results[0].image)) : null;
+
+    db.query('DELETE FROM products WHERE id = ?', [id], err => {
+      if (err) {
+        console.error('Error deleting product:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      if (imagePath && fs.existsSync(imagePath)) {
+        try {
+          fs.unlinkSync(imagePath);
+          console.log(`Deleted image file: ${imagePath}`);
+        } catch (unlinkErr) {
+          console.error(`Error deleting image file ${imagePath}:`, unlinkErr);
+        }
+      }
+
+      console.log('Product deleted:', { id });
+      return res.json({ message: 'Product deleted' });
+    });
+  });
+});
+
+// Start Server
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
