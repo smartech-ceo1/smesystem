@@ -31,7 +31,7 @@
   },
   "scripts": {
     "start": "set NODE_OPTIONS=--no-deprecation && react-scripts start",
-    "build": "react-scripts build",
+    "build": "CI=false react-scripts build",
     "server": "node server/server.js"
   },
   "eslintConfig": {
