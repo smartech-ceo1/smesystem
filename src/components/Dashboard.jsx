@@ -296,6 +296,7 @@ const Dashboard = ({ cart, setCart, refreshKey }) => {
 
   return (
     <div className="dashboard" data-theme={theme}>
+      <div className="category-hover-popup" id="categoryHoverPopup"></div>
       <div className="fixed-header">
         <div className="promo-banner">
           {promoMessages.map((message, index) => (
@@ -385,8 +386,22 @@ const Dashboard = ({ cart, setCart, refreshKey }) => {
           </div>
         </div>
       </div>
-
+   
       <div className="scrollable-content">
+              <div className="gif-banner">
+  <img src="/ANIMATE9.png" alt="Banner GIF" className="gif-image" />
+           <div className="gif-banner">
+    <img src="/ANIMATE2.png" alt="Image 2" className="gif-image" />
+    <img src="/ANIMAT10.png" alt="Image 3" className="gif-image" />
+    <img src="/ANIMATE4.png" alt="Image 4" className="gif-image" />
+    <img src="/ANIMATE6.png" alt="Image 5" className="gif-image" />
+    <img src="/ANIMATE1.png" alt="Image 6" className="gif-image" />
+    <img src="/ANIMATE7.png" alt="Image 7" className="gif-image" />
+    <img src="/ANIMATE5.png" alt="Image 8" className="gif-image" />
+    <img src="/ANIMATE3.png" alt="Image 9" className="gif-image" />
+  </div>   
+  <hr />
+</div>
         {error && (
           <div className="error-message" style={{ color: 'red', textAlign: 'center', margin: '20px' }}>
             {error}
